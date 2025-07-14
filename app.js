@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ debug: false });
 const express = require('express');
 const mongoose = require('mongoose');
 const helmet = require('helmet');
@@ -6,21 +6,16 @@ const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
 const morgan = require('morgan');
 const cors = require('cors');
+const colors = require('colors');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/error');
 
-// Connect to database
-connectDB();
-
-// Route files
-const authRoutes = require('./routes/authRoutes');
-const productRoutes = require('./routes/productRoutes');
-const cartRoutes = require('./routes/cartRoutes');
-const orderRoutes = require('./routes/orderRoutes');
-
+// Initialize Express app
 const app = express();
 
-// Security middleware
+// ==================================================
+// 1. Middleware Stack
+// ==================================================
 app.use(helmet());
 app.use(mongoSanitize());
 app.use(cors());
@@ -29,41 +24,107 @@ app.use(express.json());
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100
+  max: 100,
+  message: {
+    status: 'error',
+    message: 'Too many requests from this IP, please try again later'
+  },
+  headers: true
 });
 app.use(limiter);
 
-// Dev logging
-if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
-}
+// ==================================================
+// 2. Server Startup Sequence
+// ==================================================
+const startServer = async () => {
+  try {
+    // Database Connection
+    const conn = await connectDB();
+    
+    // Development logging
+    if (process.env.NODE_ENV === 'development') {
+      app.use(morgan('dev'));
+      console.log('🟢 Development middleware loaded'.yellow);
+    }
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'API is healthy',
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
-  });
-});
+    // ==================================================
+    // 3. API Routes
+    // ==================================================
+    app.use('/api/auth', require('./routes/authRoutes'));
+    app.use('/api/products', require('./routes/productRoutes'));
+    app.use('/api/cart', require('./routes/cartRoutes'));
+    app.use('/api/orders', require('./routes/orderRoutes'));
 
-// Mount routers
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/cart', cartRoutes);
-app.use('/api/orders', orderRoutes);
+    // ==================================================
+    // 4. Health Check Endpoint
+    // ==================================================
+    app.get('/api/health', (req, res) => {
+      res.status(200).json({
+        status: 'healthy',
+        uptime: process.uptime(),
+        database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV
+      });
+    });
 
-// Error handler
-app.use(errorHandler);
+    // ==================================================
+    // 5. Error Handling
+    // ==================================================
+    app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+    // ==================================================
+    // 6. Start Server
+    // ==================================================
+    const PORT = process.env.PORT || 5000;
+    const server = app.listen(PORT, () => {
+      console.log('\n' + '='.repeat(60).blue);
+      console.log(`🟢 Server Status:`.bold + ` Running in ${process.env.NODE_ENV || 'development'} mode`.green);
+      console.log(`🟢 Port:`.bold + ` ${PORT}`.green);
+      console.log(`🟢 MongoDB:`.bold + ` ${conn.connection.host}/${conn.connection.name}`.green);
+      console.log(`🟢 PID:`.bold + ` ${process.pid}`.green);
+      console.log('='.repeat(60).blue + '\n');
+    });
 
-const server = app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-});
+    // ==================================================
+    // 7. Graceful Shutdown Handlers
+    // ==================================================
+    process.on('SIGTERM', () => {
+      console.log('\n' + '='.repeat(60).yellow);
+      console.log('🟡 SIGTERM received. Shutting down gracefully...'.yellow.bold);
+      console.log('='.repeat(60).yellow);
+      
+      server.close(() => {
+        mongoose.connection.close(false, () => {
+          console.log('\n' + '='.repeat(60).red);
+          console.log('🔴 Server terminated'.red.bold);
+          console.log('='.repeat(60).red + '\n');
+          process.exit(0);
+        });
+      });
+    });
 
-// Handle unhandled rejections
-process.on('unhandledRejection', (err) => {
-  console.error(`Error: ${err.message}`);
-  server.close(() => process.exit(1));
-});
+    process.on('unhandledRejection', (err) => {
+      console.error('\n' + '='.repeat(60).red);
+      console.error(`🔴 Unhandled Rejection: ${err.message}`.red.bold);
+      console.error('='.repeat(60).red);
+      server.close(() => process.exit(1));
+    });
+
+    process.on('uncaughtException', (err) => {
+      console.error('\n' + '='.repeat(60).red);
+      console.error(`🔴 Uncaught Exception: ${err.message}`.red.bold);
+      console.error('='.repeat(60).red);
+      server.close(() => process.exit(1));
+    });
+
+  } catch (error) {
+    console.error('\n' + '='.repeat(60).red);
+    console.error(`🔴 Critical startup error: ${error.message}`.red.bold);
+    console.error('='.repeat(60).red);
+    process.exit(1);
+  }
+};
+
+// Start the server
+startServer();
